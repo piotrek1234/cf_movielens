@@ -1,4 +1,5 @@
 library(recommenderlab)
+library(party)
 
 makeData <- function() {
   # zwraca macierz[użytkownik, film]
@@ -48,29 +49,61 @@ getCommonMovies <- function(data, user1, user2) {
 }
 
 # znajduje użytkowników którzy ocenili te same filmy co user, sortuje i zwraca count wyników
-findSameMoviesWatchers <- function(data, user, count) {
+findSameMoviesWatchers <- function(data, user, movie, count=1000) {
   usersCount = 943
   users = vector()
   for(user2 in 1:usersCount) {
     if(user2 != user) {
-      users = append(users, c(user2, getCommonCount(data, user, user2)))
+      if(data[user2, movie] != 0) {
+        commonMovies = getCommonCount(data, user, user2)
+        if(commonMovies > 0) {
+          difference = averageDifference(data, user, user2)
+          users = append(users, c(user2, commonMovies, difference, 100*(difference^2+1)/(commonMovies+1)))
+        }
+      }
     }
   }
-  retval = matrix(users, ncol=2, byrow=TRUE)
-  colnames(retval) = c("userid", "sameMovies")
-  return(head(retval[order(retval[,2], decreasing = TRUE),], n=count))
+  retval = matrix(users, ncol=4, byrow=TRUE)
+  retval[,4]=max(retval[,4])-retval[,4]
+  colnames(retval) = c("userid", "sameMovies", "avgDifference", "importance")
+  return(head(retval[order(retval[,4], decreasing = TRUE),], n=count))
+}
+
+averageDifference <- function(data, user1, user2) {
+  sumDiffs = 0
+  commonMovies = getCommonMovies(data, user1, user2)
+  moviesCount = length(commonMovies)
+  for(m in commonMovies) {
+    sumDiffs = sumDiffs + abs(data[user1, m] - data[user2, m])
+  }
+  return(sumDiffs/moviesCount)
+}
+
+getTreeAttributes <- function(data, watchers, user, movie) {
+  moviesCount = 1682
+  movies = vector()
+  for(m in 1:moviesCount) {
+    movies = append(movies, c(m, sum(data[watchers[,1],m]>0)))
+  }
+  retval = matrix(movies, ncol=2, byrow=TRUE)
+  colnames(retval) = c("movieId", "ratingsCount")
+  return(retval[order(retval[,2], decreasing = TRUE),])
+}
+
+plantTree <- function(data, weights, user, movie) {
+  
 }
 
 # modyfikuje dane zastępująć oceny liczbą 1 lub 0 (w zależności czy ocena różni się
 # nie więcej niż diff od oceny użytkownika)
-modifyDataSameRating <- function(data, users, user, diff) {
+dataSameRating <- function(data, users, user, diff) {
   # users można zastąpić przez findSameMoviesWatchers(data, user, ileś)[,1]
   moviesCount = 1682
-  usersCount = 943
-  ratings = matrix(rep(NA, (moviesCount+1)*length(users)), byrow=TRUE, ncols=moviesCount)
+  usersCount = length(users)
+  ratings = matrix(rep(NA, (moviesCount+1)*length(users)), byrow=TRUE, ncol=(moviesCount+1))
   # w ratings będą siedzieć informacje czy ocena jest bliska czy nie
   i=1
-  for(u in users) {
+  for(u in 1:usersCount) {
     for(m in 1:moviesCount) {
       # ostatnia kolumna - id użytkownika
       ratings[i, moviesCount+1] = u
