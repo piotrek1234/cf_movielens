@@ -1,8 +1,20 @@
+# Próba zastąpienia algorytmów IBCF, UBCF z recommenderlab własnym algorytmem
+# Piotr Kuciński, Tomasz Rydzewski
+#-------------------------------------
+# Może się zdarzyć że przed uruchomieniem skryptu trzeba zmienić bieżący katalog
+# na ten, który zawiera folder ml (setwd())
+
 library(recommenderlab)
 library(party)
+library(rpart)
+library(ROCR)
 
+wd <- function() {
+  setwd('c:/users/piotrek/desktop/cf_movielens')
+}
+
+# zwraca macierz[użytkownik, film] - na przecięciu jest ocena lub 0
 makeData <- function() {
-  # zwraca macierz[użytkownik, film]
   rawData = read.table(file.path("ml", "u.data"))
   
   # tworzenie pustej macierzy: każdy wiersz reprezentuje oceny od użytkownika,
@@ -11,22 +23,14 @@ makeData <- function() {
   usersCount = 943
   usersRatings = matrix(rep(0, moviesCount*usersCount), ncol=moviesCount)
   
-  # wypełnienie macierzy
   for(ratingNr in 1:nrow(rawData)) {
     usersRatings[rawData[ratingNr, 1], rawData[ratingNr, 2]] = rawData[ratingNr, 3]
   }
-  
+  colnames(usersRatings) = c(as.character(1:moviesCount))
   return(usersRatings)
 }
 
-printDataForUser <- function(data, userId) {
-  print(data[userId, ])
-}
-
-printDataForMovie <- function(data, movieId) {
-  print(data[, movieId])
-}
-
+# zwraca filmy ocenione przez konkretnego użytkownika
 getRatedMovies <- function(data, userId) {
   moviesList = vector()
   moviesCount = 1682
@@ -69,6 +73,7 @@ findSameMoviesWatchers <- function(data, user, movie, count=1000) {
   return(head(retval[order(retval[,4], decreasing = TRUE),], n=count))
 }
 
+# średnia różnica ocen między user1 a user2
 averageDifference <- function(data, user1, user2) {
   sumDiffs = 0
   commonMovies = getCommonMovies(data, user1, user2)
@@ -79,49 +84,149 @@ averageDifference <- function(data, user1, user2) {
   return(sumDiffs/moviesCount)
 }
 
-getTreeAttributes <- function(data, watchers, user, movie) {
+# zwraca filmy, które były najwięcej razy ocenione przez branych pod
+# uwagę użytkowników (tych kórzy oglądali oceniany teraz film). Będą
+# to atrybuty do budowy drzewa
+getTreeAttributes <- function(data, watchers, user, movie, count=7) {
   moviesCount = 1682
   movies = vector()
   for(m in 1:moviesCount) {
-    movies = append(movies, c(m, sum(data[watchers[,1],m]>0)))
+    if(m != movie) {
+      movies = append(movies, c(m, sum(data[watchers[,1],m]>0)))
+    }
   }
   retval = matrix(movies, ncol=2, byrow=TRUE)
   colnames(retval) = c("movieId", "ratingsCount")
-  return(retval[order(retval[,2], decreasing = TRUE),])
+  return(head(retval[order(retval[,2], decreasing = TRUE),], count))
 }
 
-plantTree <- function(data, weights, user, movie) {
+# zwraca dataframe zawierający oceny od branych pod uwagę użytkowników
+# dla podanych atrybutów (filmów) i binaryzuje klasę przykładów (oceniany film)
+prepareDataFrame <- function(data, movie, users, movies, threshold) {
+  retval = as.data.frame(data[users[,1],append(movie, movies[,1])], row.names = as.character(users[,1]))
+  #retval = as.data.frame(data[users,movies[,1]])
+  retval[,1] = ifelse(retval[,1]>=threshold, 1, 0)
+  return(retval)
+}
+
+# zwraca oceny od konkretnego użytkownika dla podanych atrybutów (filmów)
+testDataFrame <- function(data, movies, user) {
+  retval = as.data.frame(data[c(user, user), movies[,1]])
+  return(retval)
+}
+
+# tworzy drzewo
+plantTree <- function(user, movie, threshold, attrCount=7) {
+  ratings=makeData()
+  watchers = findSameMoviesWatchers(ratings, user, movie)
+  att = getTreeAttributes(ratings, watchers, user, movie, attrCount)
+  dtfr = prepareDataFrame(ratings, movie, watchers, att, threshold)
+  frm = paste('`', movie, '` ~ ', paste(paste('`', att[,1], '`', sep=''), collapse=" + "), sep='')
+  #tree = ctree(as.formula(frm), dtfr, weights = as.integer(watchers[,4]))
+  tree = rpart(as.formula(frm), dtfr, method = "class", control = rpart.control(minsplit=5))
+  
+  print('P(1|x) = ')
+  print(predict(tree, testDataFrame(ratings, att, user))[1,2])
+  
+  return(tree)
+}
+
+testDataFrame2 <- function(data, movies, user) {
+  retval = as.data.frame(data[c(user, user), movies[,1]])
+  return(retval)
+}
+
+plantTree1uNm <- function(user, movieList, threshold, attrCount=7) {
+  ratings=makeData()
+  predictions = vector()
+  labels = vector()
+  
+  pdfPath = "1uNm.pdf"
+  #pdf(file=pdfPath)
+  
+  for(movie in movieList) {
+    watchers = findSameMoviesWatchers(ratings, user, movie)
+    att = getTreeAttributes(ratings, watchers, user, movie, attrCount)
+    dtfr = prepareDataFrame(ratings, movie, watchers, att, threshold)
+    frm = paste('`', movie, '` ~ ', paste(paste('`', att[,1], '`', sep=''), collapse=" + "), sep='')
+    tree = rpart(as.formula(frm), dtfr, method = "class", control = rpart.control(minsplit=5))
+
+    propab = predict(tree, testDataFrame(ratings, att, user))[1,2]
+    realrating = ratings[user, movie]
+    
+    print(paste('P(1|movie=', movie, ') = ', propab, ' (real rating: ', realrating, ')', sep=''))
+    #plot(tree, main=paste('Decision tree for user ', user, ' movie ', movie, 
+    #                      '\n', 'P(1|movie)=', propab, ', real rating = ', realrating, sep=''))
+    #text(tree)
+    #rocr:
+    predictions = append(predictions, propab)
+    labels = append(labels, ifelse(realrating>=threshold, 1, 0))
+  }
+  #retval = as.matrix(trs, ncol=1, byrow=TRUE)
+  #colnames(retval) = c("P(1|movie)")
+  
+  pred = prediction(predictions, labels)
+  roc.perf = performance(pred, measure = "tpr", x.measure = "fpr")
+  plot(roc.perf, main=paste("ROC for user ", user, '\n(threshold: ', threshold, ')', sep=''))
+  abline(a=0, b=1)
+  
+  #dev.off()
+  #return(tree)
+}
+
+# tworzy drzewa dla użytkownika i jego filmów
+applyTree1uNm <- function(user, threshold, attrCount, moviesCount) {
+  plantTree1uNm(user, head(getRatedMovies(makeData(), user), moviesCount), threshold, attrCount)
+}
+
+applyTree1u1m <- function(user, movie, threshold, attrCount) {
+  return(plantTree(user, movie, threshold, attrCount))
+}
+
+# informacje o danych wejściowych
+
+datainfo <- function() {
+  ratings = makeData()
+  moviesCount = 1682
+  usersCount = 943
+  
+  # histogram ocen dla filmów
+  png('plots/hist(ratings).png')
+  hist(ratings)
+  dev.off()
+  
+  # histogram ocen dla filmów (oprócz braków)
+  png('plots/hist(ratings_without_0).png')
+  hist(ratings, xlim=range(c(1,5)), ylim=range(c(0,40000)))
+  dev.off()
+  
+  # histogram ocen filmów na użytkownika
+  moviesPerUser = vector()
+  for(u in 1:usersCount) {
+    moviesPerUser = append(moviesPerUser, sum(ratings[u,] > 0))
+  }
+  png('plots/hist(movies_per_user).png')
+  hist(moviesPerUser, ylim=range(c(0, 450)), xlim=range(c(0, 800)))
+  dev.off()
+  
+  #histogram ocen filmów na film
+  ratingsPerMovie = vector()
+  for(m in 1:moviesCount) {
+    ratingsPerMovie = append(ratingsPerMovie, sum(ratings[,m] > 0))
+  }
+  png('plots/hist(ratings_per_movie.png')
+  hist(ratingsPerMovie, ylim=range(c(0, 1200)), xlim=range(c(0, 600)))
+  dev.off()
+  
+  
   
 }
 
-# modyfikuje dane zastępująć oceny liczbą 1 lub 0 (w zależności czy ocena różni się
-# nie więcej niż diff od oceny użytkownika)
-dataSameRating <- function(data, users, user, diff) {
-  # users można zastąpić przez findSameMoviesWatchers(data, user, ileś)[,1]
-  moviesCount = 1682
-  usersCount = length(users)
-  ratings = matrix(rep(NA, (moviesCount+1)*length(users)), byrow=TRUE, ncol=(moviesCount+1))
-  # w ratings będą siedzieć informacje czy ocena jest bliska czy nie
-  i=1
-  for(u in 1:usersCount) {
-    for(m in 1:moviesCount) {
-      # ostatnia kolumna - id użytkownika
-      ratings[i, moviesCount+1] = u
-      # sprawdzić czy jeden ma wpisane 0 (nie oglądał) i coś z tym zrobić
-      # jeśli różnica jest mniejsza niż diff to gdzieś wstawić
-      if(abs(data[u, m] - data[user, m]) < diff) {
-        # różnica ocen mniejsza niż diff
-        # rozkminić indeksy czy są na pewno spoko
-        ratings[i, m] = 1
-      }
-      else {
-        ratings[i, m] = 0
-      }
-      i=i+1
-    }
-    # powycinać kolumny ze zbędnymi filmami
-    # wynikiem ma być macierz: wiersz to użytkownik, w kolumnach są filmy, a wartość 1 lub 0
-    # to info czy ocenił film tak jak my. W pierwszej kolumnie można ewentualnie powpisywać
-    # id użytkownika
-  }
+ubcf_ibcf <- function() {
+  data("MovieLense")
+  ml = MovieLense
+  r1 = Recommender(ml, method="UBCF")
+  r2 = Recommender(ml, method="IBCF")
+  rc1 = predict(r1, type="ratings", as(ml[c(1,3,8),], "realRatingMatrix"))
+  rc2 = predict(r2, type="ratings", as(ml[c(1,3,8),], "realRatingMatrix"))
 }
