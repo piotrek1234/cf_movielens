@@ -3,6 +3,11 @@
 #-------------------------------------
 # Może się zdarzyć że przed uruchomieniem skryptu trzeba zmienić bieżący katalog
 # na ten, który zawiera folder ml (setwd())
+# ------------------------------------
+# analiza danych wejściowych: funkcja datainfo()
+# generowanie krzywych ROC i drzew: funkcja testy1()
+#
+#
 
 library(recommenderlab)
 library(party)
@@ -73,7 +78,7 @@ findSameMoviesWatchers <- function(data, user, movie, count=1000) {
   return(head(retval[order(retval[,4], decreasing = TRUE),], n=count))
 }
 
-# średnia różnica ocen między user1 a user2
+# średnia różnica ocen między user1 a user2 na wspólnych filmach
 averageDifference <- function(data, user1, user2) {
   sumDiffs = 0
   commonMovies = getCommonMovies(data, user1, user2)
@@ -136,55 +141,82 @@ testDataFrame2 <- function(data, movies, user) {
   return(retval)
 }
 
-plantTree1uNm <- function(user, movieList, threshold, attrCount=7) {
-  ratings=makeData()
+# drzewa dla użytkownika i jego filmów. Tworzy krzywą ROC
+plantTree1uNm <- function(ratings, user, movieList, threshold, attrCount=7) {
+  #ratings=makeData()
   predictions = vector()
   labels = vector()
   
   pdfPath = "1uNm.pdf"
   #pdf(file=pdfPath)
+  error = 0
   
   for(movie in movieList) {
-    watchers = findSameMoviesWatchers(ratings, user, movie)
-    att = getTreeAttributes(ratings, watchers, user, movie, attrCount)
-    dtfr = prepareDataFrame(ratings, movie, watchers, att, threshold)
-    frm = paste('`', movie, '` ~ ', paste(paste('`', att[,1], '`', sep=''), collapse=" + "), sep='')
-    tree = rpart(as.formula(frm), dtfr, method = "class", control = rpart.control(minsplit=5))
+    watchers = findSameMoviesWatchers(ratings, user, movie) # użytkownicy którzy oglądali te filmy co user
+    att = getTreeAttributes(ratings, watchers, user, movie, attrCount) # atrybuty do budowy drzewa
+    dtfr = prepareDataFrame(ratings, movie, watchers, att, threshold) # dataframe do budowy drzewa
+    frm = paste('`', movie, '` ~ ', paste(paste('`', att[,1], '`', sep=''), collapse=" + "), sep='') # formuła: od czego zależy klasa (ocena)
+    tree = rpart(as.formula(frm), dtfr, method = "class", control = rpart.control(minsplit=5)) # budowa drzewa
 
-    propab = predict(tree, testDataFrame(ratings, att, user))[1,2]
-    realrating = ratings[user, movie]
+    propab = predict(tree, testDataFrame(ratings, att, user))[1,2] # ocena wyznaczona przez drzewo
+    realrating = ratings[user, movie] # prawdziwa ocena użytkownika dla filmu
     
     print(paste('P(1|movie=', movie, ') = ', propab, ' (real rating: ', realrating, ')', sep=''))
-    #plot(tree, main=paste('Decision tree for user ', user, ' movie ', movie, 
-    #                      '\n', 'P(1|movie)=', propab, ', real rating = ', realrating, sep=''))
-    #text(tree)
-    #rocr:
-    predictions = append(predictions, propab)
-    labels = append(labels, ifelse(realrating>=threshold, 1, 0))
+    png(paste('trees/', user, '_', movie, '_th', threshold, '_attr', attrCount, '.png', sep=''))
+    plot(tree, main=paste('Decision tree for user ', user, ' movie ', movie, 
+                          '\n', 'P(1|movie)=', propab, ', real rating = ', realrating, sep=''))
+    text(tree)
+    dev.off()
+    #roc:
+    predictions = append(predictions, propab) # P(1|movie)
+    labels = append(labels, ifelse(realrating>=threshold, 1, 0)) # prawdziwa klasa
+    
+    # porównanie rzeczywistej i "policzonej" oceny:
+    realr = ifelse(realrating >= threshold, 1, 0)
+    compr = ifelse(propab >= 0.5, 1, 0)
+    error = error + abs(realr - compr)
+    
   }
+  avgError = error/length(movieList) # średni błąd oceny dla użytkownika
   #retval = as.matrix(trs, ncol=1, byrow=TRUE)
   #colnames(retval) = c("P(1|movie)")
   
+  #roc:
   pred = prediction(predictions, labels)
   roc.perf = performance(pred, measure = "tpr", x.measure = "fpr")
+  png(paste('roc/', user, 'th_', threshold, '.png', sep=''))
   plot(roc.perf, main=paste("ROC for user ", user, '\n(threshold: ', threshold, ')', sep=''))
   abline(a=0, b=1)
+  dev.off()
   
-  #dev.off()
-  #return(tree)
+  return(avgError)
 }
 
 # tworzy drzewa dla użytkownika i jego filmów
 applyTree1uNm <- function(user, threshold, attrCount, moviesCount) {
-  plantTree1uNm(user, head(getRatedMovies(makeData(), user), moviesCount), threshold, attrCount)
+  ratings = makeData()
+  plantTree1uNm(ratings, user, head(getRatedMovies(makeData(), user), moviesCount), threshold, attrCount)
+}
+# tworzy drzewa dla pdanych użytkowników i ich filmów
+applyTreeNuNm <- function(users, threshold, attrCount, moviesCount) {
+  ratings = makeData()
+  errors = vector()
+  for(u in users) {
+    error = plantTree1uNm(ratings, u, head(getRatedMovies(ratings, u), moviesCount), threshold, attrCount)
+    errors = append(errors, c(u, error))
+  }
+  errMat = matrix(errors, ncol=2, byrow=TRUE)
+  colnames(errMat) = c('user', 'avgError')
+  
+  return(errMat)
 }
 
+# tworzy drzewo dla użytkownika i filmu
 applyTree1u1m <- function(user, movie, threshold, attrCount) {
   return(plantTree(user, movie, threshold, attrCount))
 }
 
 # informacje o danych wejściowych
-
 datainfo <- function() {
   ratings = makeData()
   moviesCount = 1682
@@ -208,8 +240,9 @@ datainfo <- function() {
   png('plots/hist(movies_per_user).png')
   hist(moviesPerUser, ylim=range(c(0, 450)), xlim=range(c(0, 800)))
   dev.off()
+  print(paste('Średnio ocen na użytkownika: ', mean(moviesPerUser), sep=''))
   
-  #histogram ocen filmów na film
+  #histogram ocen na film
   ratingsPerMovie = vector()
   for(m in 1:moviesCount) {
     ratingsPerMovie = append(ratingsPerMovie, sum(ratings[,m] > 0))
@@ -217,16 +250,29 @@ datainfo <- function() {
   png('plots/hist(ratings_per_movie.png')
   hist(ratingsPerMovie, ylim=range(c(0, 1200)), xlim=range(c(0, 600)))
   dev.off()
-  
-  
-  
+  print(paste('Średnio ocen na film: ', mean(ratingsPerMovie), sep=''))
 }
 
-ubcf_ibcf <- function() {
-  data("MovieLense")
-  ml = MovieLense
-  r1 = Recommender(ml, method="UBCF")
-  r2 = Recommender(ml, method="IBCF")
-  rc1 = predict(r1, type="ratings", as(ml[c(1,3,8),], "realRatingMatrix"))
-  rc2 = predict(r2, type="ratings", as(ml[c(1,3,8),], "realRatingMatrix"))
+testy1 <- function() {
+  # w roc/ tworzą się wykresy ROC dla użytkowników
+  # w trees/ tworzą się drzewa dla filmów i użytkowników
+  # funkcja applyTree1uNm zwróci średni błąd dla wyznaczenia ocen użytkownikowi
+  
+  # threshold=3, attributes=5
+  applyTree1uNm(587,3,5,10)
+  applyTree1uNm(654,3,5,10)
+  applyTree1uNm(120,3,5,10)
+  applyTree1uNm(58,3,5,10)
+  
+  # threshold=3, attributes=10
+  applyTree1uNm(587,3,10,10)
+  applyTree1uNm(654,3,10,10)
+  applyTree1uNm(120,3,10,10)
+  applyTree1uNm(58,3,10,10)
+  
+  # threshold=4, attributes=5
+  applyTree1uNm(587,4,5,10)
+  applyTree1uNm(654,4,5,10)
+  applyTree1uNm(120,4,5,10)
+  applyTree1uNm(58,4,5,10)
 }
